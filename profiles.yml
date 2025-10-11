@@ -1,0 +1,13 @@
+banking_dbt:
+  outputs:
+    dev:
+      account: ph47260.southeast-asia.azure
+      database: BANKING
+      password: 123456789Phusnowflake
+      role: ACCOUNTADMIN
+      schema: analytics
+      threads: 4
+      type: snowflake
+      user: PHUNGUYENVA99
+      warehouse: COMPUTE_WH
+  target: dev
