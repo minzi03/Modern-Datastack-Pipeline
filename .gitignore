@@ -123,3 +123,8 @@ build/
 # ================================
 *.swp
 *.bak
+
+profiles.yml
+docker/airflow/.dbt/profiles.yml
+banking_dbt/.dbt/
+.env

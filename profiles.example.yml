@@ -4,7 +4,7 @@ banking_dbt:
       type: snowflake
       account: PNOZNWQ-LL71699
       user: VANTHANHNGUYEN868
-      password: 123456789@Thanh
+      password: YOUR_SNOWFLAKE_PASSWORD
       role: ACCOUNTADMIN
       database: BANKING
       warehouse: COMPUTE_WH
