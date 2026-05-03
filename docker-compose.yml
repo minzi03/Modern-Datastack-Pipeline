@@ -1,38 +1,112 @@
-version: "3.8"
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: dockerfile-airflow.dockerfile
+  restart: always
+  env_file:
+    - .env
+  environment:
+    AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER}:${AIRFLOW_DB_PASSWORD}@airflow-postgres:5432/${AIRFLOW_DB_NAME}
+  volumes:
+    - ./docker/dags:/opt/airflow/dags
+    - ./docker/logs:/opt/airflow/logs
+    - ./docker/plugins:/opt/airflow/plugins
+    - ./banking_dbt:/opt/airflow/banking_dbt
+    - ./banking_dbt/.dbt:/home/airflow/.dbt
+  networks:
+    - banking-mds-net
+
 services:
   zookeeper:
     image: confluentinc/cp-zookeeper:7.4.0
+    container_name: zookeeper
+    restart: unless-stopped
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
     ports:
       - "2181:2181"
+    healthcheck:
+      test: ["CMD-SHELL", "echo ruok | nc localhost 2181 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - banking-mds-net
 
   kafka:
     image: confluentinc/cp-kafka:7.4.1
     container_name: kafka
+    restart: unless-stopped
     depends_on:
-      - zookeeper
+      zookeeper:
+        condition: service_healthy
     ports:
-      - "9092:9092" # internal Docker network
-      - "29092:29092" # host machine access
+      - "9092:9092"
+      - "29092:29092"
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
       KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:29092
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://host.docker.internal:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "kafka-broker-api-versions",
+          "--bootstrap-server",
+          "localhost:9092",
+        ]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+    networks:
+      - banking-mds-net
+
+  postgres:
+    image: postgres:15
+    container_name: postgres
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./postgres/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+      - ./docker/postgres/data:/var/lib/postgresql/data
+    command: >
+      postgres
+      -c wal_level=logical
+      -c max_wal_senders=10
+      -c max_replication_slots=10
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - banking-mds-net
 
   connect:
     image: debezium/connect:2.2
+    container_name: connect
+    restart: unless-stopped
     depends_on:
-      - kafka
-      - zookeeper
-      - postgres
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
     ports:
       - "8083:8083"
     environment:
@@ -45,25 +119,20 @@ services:
       VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
       KEY_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
       VALUE_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
-
-  postgres:
-    image: postgres:15
-    environment:
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_DB: ${POSTGRES_DB}
-    ports:
-      - "5432:5432"
-    volumes:
-      - ./postgres/schema.sql:/docker-entrypoint-initdb.d/schema.sql
-      - ./docker/postgres/data:/var/lib/postgresql/data
-    command: >
-      postgres -c wal_level=logical
-              -c max_wal_senders=10
-              -c max_replication_slots=10
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8083/connectors || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+    networks:
+      - banking-mds-net
 
   minio:
     image: minio/minio:latest
+    container_name: minio
+    restart: unless-stopped
+    env_file:
+      - .env
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
@@ -73,52 +142,24 @@ services:
       - "9001:9001"
     volumes:
       - ./docker/minio/data:/data
-
-  airflow-webserver:
-    build:
-      context: .
-      dockerfile: dockerfile-airflow.dockerfile
-    container_name: airflow-webserver
-    restart: always
-    depends_on:
-      - airflow-scheduler
-      - airflow-postgres
-    environment:
-      - AIRFLOW__CORE__LOAD_EXAMPLES=False
-      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://${AIRFLOW_DB_USER}:${AIRFLOW_DB_PASSWORD}@airflow-postgres:5432/${AIRFLOW_DB_NAME}
-    volumes:
-      - ./docker/dags:/opt/airflow/dags
-      - ./docker/logs:/opt/airflow/logs
-      - ./docker/plugins:/opt/airflow/plugins
-      - ./banking_dbt:/opt/airflow/banking_dbt
-      - ./banking_dbt/.dbt:/home/airflow/.dbt
-    ports:
-      - "8080:8080"
-    command: webserver
-
-  airflow-scheduler:
-    build:
-      context: .
-      dockerfile: dockerfile-airflow.dockerfile
-    container_name: airflow-scheduler
-    restart: always
-    depends_on:
-      - airflow-postgres
-    environment:
-      - AIRFLOW__CORE__LOAD_EXAMPLES=False
-      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://${AIRFLOW_DB_USER}:${AIRFLOW_DB_PASSWORD}@airflow-postgres:5432/${AIRFLOW_DB_NAME}
-    volumes:
-      - ./docker/dags:/opt/airflow/dags
-      - ./docker/logs:/opt/airflow/logs
-      - ./docker/plugins:/opt/airflow/plugins
-      - ./banking_dbt:/opt/airflow/banking_dbt
-      - ./banking_dbt/.dbt:/home/airflow/.dbt
-    command: scheduler
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -f http://localhost:9000/minio/health/live || exit 1",
+        ]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+    networks:
+      - banking-mds-net
 
   airflow-postgres:
     image: postgres:15
     container_name: airflow-postgres
     restart: always
+    env_file:
+      - .env
     environment:
       POSTGRES_USER: ${AIRFLOW_DB_USER}
       POSTGRES_PASSWORD: ${AIRFLOW_DB_PASSWORD}
@@ -126,23 +167,62 @@ services:
     volumes:
       - airflow_postgres_data:/var/lib/postgresql/data
     ports:
-      - "5433:5432" # separate from banking-postgres to avoid conflict
+      - "5433:5432"
+    healthcheck:
+      test:
+        ["CMD-SHELL", "pg_isready -U ${AIRFLOW_DB_USER} -d ${AIRFLOW_DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - banking-mds-net
 
   airflow-init:
-    build:
-      context: .
-      dockerfile: dockerfile-airflow.dockerfile
-    command: bash -c "airflow db init && airflow users create --username airflow --firstname Admin --lastname User --role Admin --email admin@example.com --password airflow"
-    environment:
-      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://${AIRFLOW_DB_USER}:${AIRFLOW_DB_PASSWORD}@airflow-postgres:5432/${AIRFLOW_DB_NAME}
+    <<: *airflow-common
+    container_name: airflow-init
+    restart: "no"
     depends_on:
-      - airflow-postgres
-    networks:
-      - default
+      airflow-postgres:
+        condition: service_healthy
+    command: >
+      bash -c "
+      airflow db migrate &&
+      airflow users create
+      --username airflow
+      --firstname Admin
+      --lastname User
+      --role Admin
+      --email admin@example.com
+      --password airflow || true
+      "
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow-scheduler
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+      airflow-postgres:
+        condition: service_healthy
+    command: scheduler
+
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: airflow-webserver
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+      airflow-scheduler:
+        condition: service_started
+      airflow-postgres:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    command: webserver
 
 volumes:
   airflow_postgres_data:
-  postgres_data:
+
 networks:
-  default:
+  banking-mds-net:
     name: banking-mds-net

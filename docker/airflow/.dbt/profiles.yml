@@ -3,8 +3,8 @@ banking_dbt:
     dev:
       type: snowflake
       account: PNOZNWQ-LL71699
-      user: VANTHANHNGUYEN868
-      password: 123456789@Thanh
+      user: VANTHANHNGUYENB68
+      password: "123456789@Thanh"
       role: ACCOUNTADMIN
       database: BANKING
       warehouse: COMPUTE_WH
