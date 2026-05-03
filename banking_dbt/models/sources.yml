@@ -6,5 +6,8 @@ sources:
     schema: RAW
     tables:
       - name: customers
+        description: "Raw customers data ingested from MinIO into Snowflake RAW layer"
       - name: accounts
+        description: "Raw accounts data ingested from MinIO into Snowflake RAW layer"
       - name: transactions
+        description: "Raw transactions data ingested from MinIO into Snowflake RAW layer"

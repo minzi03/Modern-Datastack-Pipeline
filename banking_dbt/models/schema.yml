@@ -1,0 +1,106 @@
+version: 2
+
+models:
+  - name: stg_customers
+    description: "Staging view for customer records loaded from RAW layer"
+    columns:
+      - name: customer_id
+        tests:
+          - not_null
+          - unique
+      - name: email
+        tests:
+          - not_null
+
+  - name: stg_accounts
+    description: "Staging view for account records loaded from RAW layer"
+    columns:
+      - name: account_id
+        tests:
+          - not_null
+          - unique
+      - name: customer_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_customers')
+                field: customer_id
+      - name: balance
+        tests:
+          - not_null
+
+  - name: stg_transactions
+    description: "Staging view for transaction records loaded from RAW layer"
+    columns:
+      - name: transaction_id
+        tests:
+          - not_null
+          - unique
+      - name: account_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_accounts')
+                field: account_id
+      - name: amount
+        tests:
+          - not_null
+      - name: transaction_time
+        tests:
+          - not_null
+
+  - name: dim_customers
+    description: "Customer dimension with SCD Type 2 tracking"
+    columns:
+      - name: customer_id
+        tests:
+          - not_null
+      - name: email
+        tests:
+          - not_null
+      - name: is_current
+        tests:
+          - not_null
+
+  - name: dim_accounts
+    description: "Account dimension with SCD Type 2 tracking"
+    columns:
+      - name: account_id
+        tests:
+          - not_null
+      - name: customer_id
+        tests:
+          - not_null
+      - name: is_current
+        tests:
+          - not_null
+
+  - name: fact_transactions
+    description: "Fact table storing all banking transactions"
+    columns:
+      - name: transaction_id
+        tests:
+          - not_null
+          - unique
+      - name: account_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_accounts')
+                field: account_id
+      - name: customer_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_customers')
+                field: customer_id
+      - name: amount
+        tests:
+          - not_null
+      - name: transaction_time
+        tests:
+          - not_null
