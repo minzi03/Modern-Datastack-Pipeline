@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [ main, dev ]
+    branches: [main, dev]
   pull_request:
-    branches: [ main ]
+    branches: [main]
 
 jobs:
   tests:
@@ -14,61 +14,87 @@ jobs:
       postgres:
         image: postgres:15
         env:
-          POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
-          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          POSTGRES_USER: ci_user
+          POSTGRES_PASSWORD: ci_pass
           POSTGRES_DB: banking
         ports:
           - 5432:5432
         options: >-
-          --health-cmd pg_isready
+          --health-cmd "pg_isready -U ci_user -d banking"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
 
+    env:
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ci_user
+      POSTGRES_PASSWORD: ci_pass
+      POSTGRES_DB: banking
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - name: Setup Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install dbt-snowflake
+          pip install ruff pytest dbt-snowflake
 
       - name: Run linters
-        run: |
-          pip install ruff
-          ruff check .
+        run: ruff check .
 
       - name: Run unit tests
         run: |
-          pip install pytest
-          pytest tests/ || echo "No tests yet"
+          if [ -d "tests" ]; then
+            pytest tests -v
+          else
+            echo "No tests directory yet."
+          fi
+
+      - name: Check Snowflake secrets
+        id: snowflake_check
+        run: |
+          if [ -z "${{ secrets.SNOWFLAKE_ACCOUNT }}" ] || \
+             [ -z "${{ secrets.SNOWFLAKE_USER }}" ] || \
+             [ -z "${{ secrets.SNOWFLAKE_PASSWORD }}" ] || \
+             [ -z "${{ secrets.SNOWFLAKE_WAREHOUSE }}" ]; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "Snowflake secrets not configured. Skipping dbt compile."
+          else
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Setup dbt profile
+        if: steps.snowflake_check.outputs.available == 'true'
         run: |
           mkdir -p ~/.dbt
-          cat > ~/.dbt/profiles.yml <<EOL
+          cat > ~/.dbt/profiles.yml <<EOF
           banking_dbt:
             target: dev
             outputs:
               dev:
                 type: snowflake
-                account: ${{ secrets.SNOWFLAKE_ACCOUNT }}
-                user: ${{ secrets.SNOWFLAKE_USER }}
-                password: ${{ secrets.SNOWFLAKE_PASSWORD }}
+                account: "${{ secrets.SNOWFLAKE_ACCOUNT }}"
+                user: "${{ secrets.SNOWFLAKE_USER }}"
+                password: "${{ secrets.SNOWFLAKE_PASSWORD }}"
                 role: ACCOUNTADMIN
                 database: BANKING
-                warehouse: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+                warehouse: "${{ secrets.SNOWFLAKE_WAREHOUSE }}"
                 schema: ANALYTICS
-          EOL
+                threads: 4
+          EOF
 
       - name: dbt compile (validation)
+        if: steps.snowflake_check.outputs.available == 'true'
+        working-directory: banking_dbt
         run: |
-          cd banking_dbt
           dbt deps
           dbt compile
