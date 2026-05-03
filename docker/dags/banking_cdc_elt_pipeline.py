@@ -8,6 +8,7 @@ import boto3
 import snowflake.connector
 from airflow import DAG
 from airflow.models import Variable
+from airflow.operators.bash import BashOperator
 from airflow.operators.python import PythonOperator, ShortCircuitOperator
 from dotenv import load_dotenv
 
@@ -32,6 +33,10 @@ SNOWFLAKE_DB = os.getenv("SNOWFLAKE_DB", "BANKING")
 SNOWFLAKE_SCHEMA = os.getenv("SNOWFLAKE_SCHEMA", "RAW")
 SNOWFLAKE_ROLE = os.getenv("SNOWFLAKE_ROLE")
 
+# -------- dbt Config --------
+DBT_PROJECT_DIR = "/opt/airflow/banking_dbt"
+DBT_PROFILES_DIR = "/home/airflow/.dbt"
+
 TABLES = ["customers", "accounts", "transactions"]
 
 
@@ -53,13 +58,6 @@ def validate_config() -> None:
     if missing:
         raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
 
-    placeholders = [
-        k for k, v in required.items()
-        if isinstance(v, str) and v.startswith("YOUR_")
-    ]
-    if placeholders:
-        raise ValueError(f"Placeholder values detected: {', '.join(placeholders)}")
-
 
 def get_s3_client():
     return boto3.client(
@@ -79,6 +77,7 @@ def get_snowflake_connection():
         "database": SNOWFLAKE_DB,
         "schema": SNOWFLAKE_SCHEMA,
     }
+
     if SNOWFLAKE_ROLE:
         connect_kwargs["role"] = SNOWFLAKE_ROLE
 
@@ -86,9 +85,6 @@ def get_snowflake_connection():
 
 
 def list_new_files() -> dict[str, list[str]]:
-    """
-    List new parquet files from MinIO that have not been processed yet.
-    """
     validate_config()
     s3 = get_s3_client()
     new_files: dict[str, list[str]] = {}
@@ -111,9 +107,8 @@ def list_new_files() -> dict[str, list[str]]:
         for page in paginator.paginate(Bucket=MINIO_BUCKET, Prefix=prefix):
             for obj in page.get("Contents", []):
                 key = obj["Key"]
-                if not key.endswith(".parquet"):
-                    continue
-                if key not in processed_keys:
+
+                if key.endswith(".parquet") and key not in processed_keys:
                     table_new_keys.append(key)
 
         table_new_keys.sort()
@@ -131,14 +126,6 @@ def has_new_files(**context) -> bool:
 
 
 def download_from_minio(**context) -> dict[str, list[dict[str, str]]]:
-    """
-    Download only new files from MinIO to local temp storage.
-    Returns:
-    {
-        "customers": [{"key": "...", "local_path": "..."}],
-        ...
-    }
-    """
     os.makedirs(LOCAL_DIR, exist_ok=True)
     s3 = get_s3_client()
 
@@ -171,11 +158,6 @@ def download_from_minio(**context) -> dict[str, list[dict[str, str]]]:
 
 
 def validate_copy_results(table: str, copy_results: list[tuple[Any, ...]]) -> None:
-    """
-    Validate COPY INTO results.
-    Snowflake typically returns rows like:
-    (file, status, rows_parsed, rows_loaded, error_limit, errors_seen, first_error, ...)
-    """
     if not copy_results:
         logger.warning("COPY INTO returned no rows for table %s.", table)
         return
@@ -191,9 +173,6 @@ def validate_copy_results(table: str, copy_results: list[tuple[Any, ...]]) -> No
 
 
 def ensure_table_exists(cur, table: str) -> None:
-    """
-    Validate target RAW table exists before PUT/COPY.
-    """
     sql = f"""
     SELECT COUNT(*)
     FROM {SNOWFLAKE_DB}.INFORMATION_SCHEMA.TABLES
@@ -210,10 +189,6 @@ def ensure_table_exists(cur, table: str) -> None:
 
 
 def load_to_snowflake(**context) -> dict[str, list[str]]:
-    """
-    Load downloaded parquet files into Snowflake RAW tables.
-    Returns loaded MinIO object keys per table so they can be marked as processed.
-    """
     downloaded_files: dict[str, list[dict[str, str]]] = context["ti"].xcom_pull(
         task_ids="download_minio"
     )
@@ -238,7 +213,6 @@ def load_to_snowflake(**context) -> dict[str, list[str]]:
 
             ensure_table_exists(cur, table)
 
-            # Upload files to Snowflake table stage
             for entry in file_entries:
                 local_path = entry["local_path"]
                 minio_key = entry["key"]
@@ -252,7 +226,6 @@ def load_to_snowflake(**context) -> dict[str, list[str]]:
 
                 loaded_keys[table].append(minio_key)
 
-            # Load parquet into structured RAW table
             copy_sql = f"""
             COPY INTO {table}
             FROM @%{table}
@@ -266,12 +239,11 @@ def load_to_snowflake(**context) -> dict[str, list[str]]:
             copy_results = cur.fetchall()
             validate_copy_results(table, copy_results)
 
-            # Clean table stage explicitly
             cur.execute(f"REMOVE @%{table}")
             logger.info("Cleaned Snowflake stage for table: %s", table)
 
         conn.commit()
-        logger.info("Snowflake load completed successfully.")
+        logger.info("Snowflake RAW load completed successfully.")
         return loaded_keys
 
     except Exception:
@@ -283,9 +255,6 @@ def load_to_snowflake(**context) -> dict[str, list[str]]:
 
 
 def mark_files_processed(**context) -> None:
-    """
-    Persist processed MinIO object keys into Airflow Variables.
-    """
     loaded_keys: dict[str, list[str]] = context["ti"].xcom_pull(task_ids="load_snowflake")
 
     if not loaded_keys:
@@ -310,9 +279,6 @@ def mark_files_processed(**context) -> None:
 
 
 def cleanup_local_files(**context) -> None:
-    """
-    Remove local temp files after loading to Snowflake.
-    """
     downloaded_files: dict[str, list[dict[str, str]]] = context["ti"].xcom_pull(
         task_ids="download_minio"
     )
@@ -331,18 +297,20 @@ def cleanup_local_files(**context) -> None:
 
 default_args = {
     "owner": "airflow",
+    "depends_on_past": False,
     "retries": 2,
     "retry_delay": timedelta(minutes=2),
 }
 
 with DAG(
-    dag_id="minio_to_snowflake_banking",
+    dag_id="banking_cdc_elt_pipeline",
     default_args=default_args,
-    description="Load new MinIO parquet files into Snowflake RAW tables",
+    description="End-to-end CDC ELT pipeline from MinIO to Snowflake with dbt snapshots, marts, and tests",
     schedule_interval="*/5 * * * *",
     start_date=datetime(2025, 1, 1),
     catchup=False,
-    tags=["minio", "snowflake", "raw", "ingestion"],
+    max_active_runs=1,
+    tags=["cdc", "minio", "snowflake", "dbt", "scd2", "elt"],
 ) as dag:
 
     task_list_files = PythonOperator(
@@ -361,7 +329,7 @@ with DAG(
     )
 
     task_load = PythonOperator(
-        task_id="load_snowflake",
+        task_id="load_snowflake_raw",
         python_callable=load_to_snowflake,
     )
 
@@ -376,6 +344,38 @@ with DAG(
         trigger_rule="all_done",
     )
 
+    dbt_run_staging = BashOperator(
+        task_id="dbt_run_staging",
+        bash_command=(
+            f"cd {DBT_PROJECT_DIR} "
+            f"&& dbt run --select staging --profiles-dir {DBT_PROFILES_DIR}"
+        ),
+    )
+
+    dbt_snapshot = BashOperator(
+        task_id="dbt_snapshot",
+        bash_command=(
+            f"cd {DBT_PROJECT_DIR} "
+            f"&& dbt snapshot --profiles-dir {DBT_PROFILES_DIR}"
+        ),
+    )
+
+    dbt_run_marts = BashOperator(
+        task_id="dbt_run_marts",
+        bash_command=(
+            f"cd {DBT_PROJECT_DIR} "
+            f"&& dbt run --select marts --profiles-dir {DBT_PROFILES_DIR}"
+        ),
+    )
+
+    dbt_test = BashOperator(
+        task_id="dbt_test",
+        bash_command=(
+            f"cd {DBT_PROJECT_DIR} "
+            f"&& dbt test --profiles-dir {DBT_PROFILES_DIR}"
+        ),
+    )
+
     (
         task_list_files
         >> task_has_new_files
@@ -383,4 +383,8 @@ with DAG(
         >> task_load
         >> task_mark_processed
         >> task_cleanup
+        >> dbt_run_staging
+        >> dbt_snapshot
+        >> dbt_run_marts
+        >> dbt_test
     )
