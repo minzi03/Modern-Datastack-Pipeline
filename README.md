@@ -1,4 +1,4 @@
-# Modern Data Stack Pipeline
+# Modern Data Stack Pipeline (Banking Domain)
 
 ![Snowflake](https://img.shields.io/badge/Snowflake-29B5E8?logo=snowflake&logoColor=white)
 ![DBT](https://img.shields.io/badge/dbt-FF694B?logo=dbt&logoColor=white)
@@ -16,9 +16,11 @@
 
 ## Overview
 
-This project implements a **Modern Data Stack (MDS)** pipeline for a **Banking domain**, enabling *real-time ingestion, transformation, and analytics-ready data warehousing*.
+This project implements an **end-to-end Modern Data Stack (MDS)** pipeline for a **Banking domain**, enabling **near real-time data ingestion, transformation, and analytics-ready data warehousing**.
 
-Data flows from a **PostgreSQL transactional system** → captured via **Debezium CDC into Kafka topics** → persisted in **MinIO** as Parquet → loaded into **Snowflake** via **Airflow DAGs** → transformed using **dbt** → validated and deployed via **GitHub Actions CI/CD**.
+Data flows from a **PostgreSQL transactional system** → captured via **Debezium CDC into Kafka topics** → persisted in **MinIO** as Parquet → loaded into **Snowflake** via **Airflow DAGs** → transformed using **dbt (SCD Type-2 + incremental models)** → validated and deployed via **GitHub Actions CI/CD**.
+
+> **Key highlight:** CDC-based pipeline with **micro-batching + idempotent ingestion + automated ELT orchestration**
 
 ---
 
@@ -29,47 +31,21 @@ Data flows from a **PostgreSQL transactional system** → captured via **Debeziu
 </p>
 
 ```plaintext
-              ┌────────────────────────────────────────────┐
-              │          Source Database (Postgres)         │
-              │ • customers, accounts, transactions         │
-              └───────────────┬─────────────────────────────┘
-                              │ Debezium CDC
-                              ▼
-              ┌────────────────────────────────────────────┐
-              │         Kafka Connect (Debezium)            │
-              │ • Captures row-level change events          │
-              └───────────────┬─────────────────────────────┘
-                              │ Kafka topics
-                              ▼
-              ┌────────────────────────────────────────────┐
-              │         Kafka Consumer (Python)             │
-              │ • Consumes messages                         │
-              │ • Writes Parquet files to MinIO             │
-              └───────────────┬─────────────────────────────┘
-                              ▼
-              ┌────────────────────────────────────────────┐
-              │              MinIO Storage                 │
-              │ • Raw Parquet objects (per table)          │
-              └───────────────┬─────────────────────────────┘
-                              ▼
-              ┌────────────────────────────────────────────┐
-              │              Airflow DAGs                  │
-              │ ① Extract from MinIO                       │
-              │ ② Load to Snowflake RAW schema             │
-              │ ③ Trigger dbt transformations              │
-              └───────────────┬─────────────────────────────┘
-                              ▼
-              ┌────────────────────────────────────────────┐
-              │           Snowflake Data Warehouse          │
-              │ • RAW → STAGING → ANALYTICS layers          │
-              │ • Fact + Dimension models via dbt           │
-              └───────────────┬─────────────────────────────┘
-                              ▼
-              ┌────────────────────────────────────────────┐
-              │             BI / Analytics Layer            │
-              │ • Power BI / Looker / Metabase              │
-              │ • KPIs: revenue, transactions, customers    │
-              └────────────────────────────────────────────┘
+PostgreSQL
+   ↓ (CDC - Debezium)
+Kafka Topics
+   ↓
+Kafka Consumer (Python - micro-batch)
+   ↓
+MinIO (Parquet - Bronze)
+   ↓
+Airflow DAG (5-minute schedule)
+   ↓
+Snowflake RAW
+   ↓
+dbt (staging → SCD2 → marts)
+   ↓
+Analytics / BI
 ````
 
 ---
@@ -79,81 +55,120 @@ Data flows from a **PostgreSQL transactional system** → captured via **Debeziu
 | Layer              | Tool / Service           | Description                                                |
 | ------------------ | ------------------------ | ---------------------------------------------------------- |
 | **Source**         | PostgreSQL               | Operational data (`customers`, `accounts`, `transactions`) |
-| **CDC**            | Debezium + Kafka Connect | Captures INSERT/UPDATE/DELETE changes in real-time         |
+| **CDC**            | Debezium + Kafka Connect | Captures INSERT/UPDATE/DELETE changes                      |
 | **Streaming**      | Apache Kafka             | Message broker for CDC topics                              |
-| **Storage**        | MinIO                    | S3-compatible object store (raw Parquet files)             |
-| **Orchestration**  | Apache Airflow           | Automates ELT tasks and dbt workflow                       |
-| **Warehouse**      | Snowflake                | Centralized analytics data warehouse                       |
-| **Transformation** | dbt                      | SQL-based modeling, testing, snapshots                     |
-| **Automation**     | GitHub Actions           | CI/CD pipeline for dbt builds & tests                      |
-| **Visualization**  | Power BI / Looker        | BI dashboards for analytics KPIs                           |
+| **Ingestion**      | Python Consumer          | Micro-batch processing → Parquet                           |
+| **Storage**        | MinIO                    | S3-compatible object store                                 |
+| **Orchestration**  | Apache Airflow           | End-to-end ELT orchestration                               |
+| **Warehouse**      | Snowflake                | RAW + ANALYTICS layers                                     |
+| **Transformation** | dbt                      | Staging, marts, SCD Type-2                                 |
+| **Automation**     | GitHub Actions           | CI/CD pipeline                                             |
+
+---
+
+## Key Design Decisions
+
+### 1. CDC-based ingestion
+
+* Uses Debezium to capture row-level changes
+* Supports:
+
+  * INSERT / UPDATE / DELETE
+* Eliminates full refresh
+
+---
+
+### 2. Micro-batching (not true streaming)
+
+* Kafka consumer buffers records (e.g. 50 records/batch)
+* Writes Parquet files to MinIO
+
+**Trade-off:**
+
+* Efficient storage & compute
+* Compatible with warehouse ingestion (Snowflake COPY)
+* Not event-level real-time
+
+Result: **Near real-time pipeline**
+
+---
+
+### 3. Idempotent ingestion
+
+* Tracks processed files using:
+
+  * Airflow Variables
+* Ensures:
+
+  * No duplicate loads
+  * Safe retries
+
+---
+
+### 4. ELT orchestration (Airflow DAG)
+
+Single DAG:
+
+```
+banking_cdc_elt_pipeline
+```
+
+Pipeline steps:
+
+1. Detect new files in MinIO
+2. Load into Snowflake RAW
+3. Run dbt snapshot (SCD2)
+4. Run dbt models (staging → marts)
+5. Run dbt tests
+
+---
+
+### 5. Data modeling (dbt)
+
+* **Staging layer** → clean CDC data
+* **Snapshots** → SCD Type-2 history
+* **Marts layer** → Star Schema
 
 ---
 
 ## Repository Structure
 
 ```bash
-modern-datastack-pipeline/
-│
-├── docker-compose.yml
-├── dockerfile-airflow.dockerfile
-├── requirements.txt
-│
-├── postgres/
-│   └── schema.sql
-│
-├── consumer/
-│   └── kafka_to_minio.py                # Kafka consumer → MinIO (Parquet)
-│
-├── dags/
-│   ├── minio_to_snowflake_dag.py        # Airflow DAG for ingestion
-│   └── scd_snapshots.py                 # dbt snapshot orchestration
-│
-├── banking_dbt/                         # dbt project
-│   ├── dbt_project.yml
-│   ├── profiles.yml
-│   ├── models/
-│   │   ├── staging/
-│   │   │   ├── stg_customers.sql
-│   │   │   ├── stg_accounts.sql
-│   │   │   └── stg_transactions.sql
-│   │   ├── marts/
-│   │   │   ├── dimensions/
-│   │   │   │   ├── dim_customers.sql
-│   │   │   │   └── dim_accounts.sql
-│   │   │   └── facts/
-│   │   │       └── fact_transactions.sql
-│   │   └── schema.yml
-│   └── snapshots/
-│       ├── customers_snapshot.sql
-│       ├── accounts_snapshot.sql
-│       └── ...
-│
-└── .github/
-    └── workflows/
-        ├── ci.yml
-        └── cd.yml
+.
+├── consumer/                 # Kafka → MinIO ingestion
+├── data-generator/           # Fake data generator
+├── docker/
+│   ├── airflow/              # Airflow config
+│   └── dags/
+│       └── banking_cdc_elt_pipeline.py
+├── banking_dbt/              # dbt project
+├── kafka-debezium/           # CDC connector setup
+├── tests/                    # unit tests
+├── postgres/                 # schema
+├── .github/workflows/        # CI/CD
 ```
 
 ---
 
 ## How to Run the Project
 
-### 1️. Launch All Services
+### 1. Start all services
 
 ```bash
 docker-compose up -d
 ```
 
-Starts all components:
+Includes:
 
-> PostgreSQL · Kafka · Zookeeper · Debezium Connect · MinIO · Airflow
+* PostgreSQL
+* Kafka + Zookeeper
+* Debezium
+* MinIO
+* Airflow
 
 ---
 
-### 2️. Generate Fake Data (Optional)
-
-Populate PostgreSQL tables with synthetic data:
+### 2. Generate sample data
 
 ```bash
 python data-generator/faker_generator.py
@@ -161,46 +176,33 @@ python data-generator/faker_generator.py
 
 ---
 
-### 3️. Check Debezium Connector
-
-```bash
-curl http://localhost:8083/connectors/postgres-connector/status
-```
-
-Expected:
-
-```json
-{"name":"postgres-connector","connector":{"state":"RUNNING"}}
-```
-
----
-
-### 4️. Consume Kafka Messages → MinIO
+### 3. Run Kafka Consumer
 
 ```bash
 python consumer/kafka_to_minio.py
 ```
 
-This consumes topics:
-
-* `banking_server.public.customers`
-* `banking_server.public.accounts`
-* `banking_server.public.transactions`
-
-and writes `.parquet` files to MinIO (bucket `raw`).
+Writes CDC events → MinIO (Parquet)
 
 ---
 
-### 5️. Airflow DAG: MinIO → Snowflake
+### 4. Run Airflow Pipeline
 
-In Airflow UI ([http://localhost:8080](http://localhost:8080)):
+Access UI:
 
-* Trigger DAG: `minio_to_snowflake_banking`
-* Loads all parquet files into Snowflake `RAW` schema.
+```
+http://localhost:8080
+```
+
+Trigger DAG:
+
+```
+banking_cdc_elt_pipeline
+```
 
 ---
 
-### 6️. dbt Transformation (Snowflake)
+### 5. Run dbt manually (optional)
 
 ```bash
 cd banking_dbt
@@ -209,79 +211,124 @@ dbt run
 dbt test
 ```
 
-Creates:
-
-* **Staging Views:** `stg_customers`, `stg_accounts`, `stg_transactions`
-* **Dimensions:** `dim_customers`, `dim_accounts`
-* **Fact Table:** `fact_transactions`
-
 ---
 
 ## Data Warehouse Design
 
-**Medallion Architecture:**
+### Medallion Architecture
 
-| Layer     | Description                    | Example Tables                                       |
-| --------- | ------------------------------ | ---------------------------------------------------- |
-| Bronze | Raw data from MinIO (parquet)  | `raw.customers`, `raw.accounts`, `raw.transactions`  |
-| Silver | Cleaned & deduplicated staging | `stg_customers`, `stg_accounts`, `stg_transactions`  |
-| Gold   | Star schema for BI             | `dim_customers`, `dim_accounts`, `fact_transactions` |
+| Layer  | Description                 | Example Tables                       |
+| ------ | --------------------------- | ------------------------------------ |
+| Bronze | Raw CDC data (Parquet)      | `raw.customers`                      |
+| Silver | Cleaned staging             | `stg_customers`                      |
+| Gold   | Analytics-ready Star Schema | `dim_customers`, `fact_transactions` |
 
 ---
 
-## CI/CD with GitHub Actions
+### SCD Type-2 Example
 
-**Workflow:** `.github/workflows/cd.yml`
-
-Automatically runs on push to `main`:
-
-```bash
-dbt deps
-dbt run
-dbt test
+```sql
+SELECT *
+FROM ANALYTICS.CUSTOMERS_SNAPSHOT
+WHERE customer_id = 54;
 ```
 
-### Required Secrets
+Tracks full history:
 
-| Secret                | Example             |
-| --------------------- | ------------------- |
-| `SNOWFLAKE_ACCOUNT`   | `XY12345.us-east-1` |
-| `SNOWFLAKE_USER`      | `DATAENG_USER`      |
-| `SNOWFLAKE_PASSWORD`  | `********`          |
-| `SNOWFLAKE_WAREHOUSE` | `COMPUTE_WH`        |
+| customer_id | name        | valid_from | valid_to | is_current |
+| ----------- | ----------- | ---------- | -------- | ---------- |
+| 54          | Realtime    | 01:56      | 05:21    | FALSE      |
+| 54          | Realtime_V2 | 05:21      | NULL     | TRUE       |
 
 ---
 
-## BI Dashboards (Future Integration)
+## Testing & CI/CD
 
-Connect Power BI directly to the **Snowflake ANALYTICS** schema.
+### Python Tests
 
-### **Planned Dashboards**
+```bash
+pytest tests/
+```
 
-| Dashboard                | Description                                         |
-| ------------------------ | --------------------------------------------------- |
-| **Transaction Overview** | Total transaction amount, volume, net flows         |
-| **Customer Insights**    | Top customers by balance / transaction count        |
-| **Account Health**       | Account type mix, currency exposure, total balances |
+13 tests passed
 
 ---
 
-## Key Features
+### dbt Tests
 
-* Real-time **Change Data Capture (CDC)** via Debezium & Kafka
-* **Object-based Data Lake** with MinIO (S3-compatible)
-* Automated **Airflow DAG orchestration**
-* Cloud-native **Snowflake DWH**
-* Modular **dbt models** with testing & snapshots
-* CI/CD deployment via **GitHub Actions**
-* Future-ready for BI tools (Power BI, Looker, Metabase)
+* not_null
+* unique
+* relationships
+
+28 tests passed in CI/CD
+
+---
+
+## CI/CD (GitHub Actions)
+
+### CI
+
+* Lint (ruff)
+* Unit tests (pytest)
+* dbt compile
+
+### CD
+
+* dbt run
+* dbt test
+
+---
+
+## Example Queries
+
+```sql
+-- Customer history
+SELECT *
+FROM ANALYTICS.CUSTOMERS_SNAPSHOT;
+
+-- Current customers
+SELECT *
+FROM ANALYTICS.DIM_CUSTOMERS_CURRENT;
+
+-- Transaction aggregation
+SELECT customer_id, SUM(amount)
+FROM ANALYTICS.FACT_TRANSACTIONS
+GROUP BY customer_id;
+```
+
+---
+
+## Limitations
+
+* Uses micro-batch → not true streaming
+* No Spark/Flink streaming engine
+* Dependent on Snowflake availability
 
 ---
 
 ## Future Enhancements
 
-* Implement full **dbt SCD Type-2 snapshots**
-* Add **Great Expectations** for data quality validation
-* Deploy Airflow on **Kubernetes (MWAA / Astronomer)**
-* Add **Metabase/Superset dashboards**
-* Extend to **real-time analytics (Kafka Streams / Spark Streaming)**
+* Replace micro-batch with:
+
+  * Spark Structured Streaming
+* Add:
+
+  * Great Expectations
+* Deploy:
+
+  * Airflow on Kubernetes
+* Add:
+
+  * BI dashboards (Power BI / Superset)
+
+---
+
+## Key Features
+
+* CDC pipeline (Debezium + Kafka)
+* Near real-time ingestion
+* Data lake (MinIO)
+* Automated Airflow DAG
+* Snowflake warehouse
+* dbt SCD Type-2 modeling
+* CI/CD for data pipelines
