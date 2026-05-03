@@ -1,26 +1,125 @@
-# GitHub Actions cache
-/.github/.cache
+# # GitHub Actions cache
+# /.github/.cache
 
-# Docker cache
+# # Docker cache
+# docker/logs/
+# docker/minio/
+# docker/plugins/
+# docker/postgres/
+
+# # DBT cache
+# banking_dbt/.dbt/
+# banking_dbt/analyses/
+# banking_dbt/logs/
+# banking_dbt/macros/
+# banking_dbt/seeds/
+# banking_dbt/target/
+# banking_dbt/tests/
+
+# .env
+# __pycache__/
+# *.pyc
+# .vscode/
+# .idea/
+# .DS_Store
+# docker-compose.override.yml
+# logs/
+
+# ================================
+# OS / Editor
+# ================================
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# ================================
+# Python
+# ================================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+*.tmp
+
+# ================================
+# Environment variables
+# ================================
+.env
+.env.*
+!.env.example
+
+# ================================
+# Docker
+# ================================
 docker/logs/
 docker/minio/
 docker/plugins/
 docker/postgres/
+docker/airflow/logs/
+docker/airflow/dags/__pycache__/
 
-# DBT cache
-banking_dbt/.dbt/
-banking_dbt/analyses/
-banking_dbt/logs/
-banking_dbt/macros/
-banking_dbt/seeds/
-banking_dbt/target/
-banking_dbt/tests/
-
-.env
-__pycache__/
-*.pyc
-.vscode/
-.idea/
-.DS_Store
+# Optional override
 docker-compose.override.yml
+
+# ================================
+# Airflow
+# ================================
+airflow.db
+airflow-webserver.pid
+webserver_config.py
+
+# ================================
+# dbt
+# ================================
+banking_dbt/target/
+banking_dbt/dbt_packages/
+banking_dbt/logs/
+banking_dbt/.dbt/
+
+# ❗ KHÔNG ignore macros nếu bạn có custom macro
+# banking_dbt/macros/   ← bỏ dòng này (quan trọng)
+
+# Optional nếu không dùng
+banking_dbt/analyses/
+banking_dbt/seeds/
+
+# ================================
+# Kafka / Data / Temp
+# ================================
+*.parquet
+*.csv
+*.json
+/tmp/
+tmp/
+
+# ================================
+# Logs
+# ================================
 logs/
+*.log
+
+# ================================
+# GitHub Actions cache
+# ================================
+.github/.cache/
+
+# ================================
+# Testing
+# ================================
+.pytest_cache/
+.coverage
+
+# ================================
+# Build / Dist
+# ================================
+dist/
+build/
+*.egg-info/
+
+# ================================
+# Misc
+# ================================
+*.swp
+*.bak

@@ -1,26 +1,62 @@
-# GitHub Actions cache
-/.github/.cache
+# =========================
+# Secrets / environment
+# =========================
+.env
+.env.*
+!.env.example
+profiles.yml
+.user.yml
+**/profiles.yml
+**/.user.yml
 
-# Docker cache
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+venv/
+env/
+
+# =========================
+# dbt artifacts
+# =========================
+dbt_packages/
+target/
+logs/
+banking_dbt/dbt_packages/
+banking_dbt/target/
+banking_dbt/logs/
+banking_dbt/.dbt/
+
+# Keep source folders if you actually use them
+# Do NOT ignore analyses/macros/seeds/tests unless they are generated
+# banking_dbt/analyses/
+# banking_dbt/macros/
+# banking_dbt/seeds/
+# banking_dbt/tests/
+
+# =========================
+# Docker runtime data
+# =========================
 docker/logs/
 docker/minio/
 docker/plugins/
 docker/postgres/
 
-# DBT cache
-banking_dbt/.dbt/
-banking_dbt/analyses/
-banking_dbt/logs/
-banking_dbt/macros/
-banking_dbt/seeds/
-banking_dbt/target/
-banking_dbt/tests/
-
-.env
-__pycache__/
-*.pyc
+# =========================
+# IDE / OS
+# =========================
 .vscode/
 .idea/
 .DS_Store
+Thumbs.db
+
+# =========================
+# Misc
+# =========================
+*.log
 docker-compose.override.yml
-logs/
